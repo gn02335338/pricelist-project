@@ -19,12 +19,25 @@ V3.1:
 '''
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import pandas as pd
 import numpy as np
 import time
 import os
 import threading
+import tempfile
+
+import snowflake.connector
+from snowflake.connector.pandas_tools import write_pandas
+
+SNOWFLAKE_CONFIG = {
+    'user': os.getenv('SNOWFLAKE_USER'),
+    'password': os.getenv('SNOWFLAKE_PASSWORD'),
+    'account': os.getenv('SNOWFLAKE_ACCOUNT'),
+    'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE'),
+    'database': os.getenv('SNOWFLAKE_DATABASE'),
+    'schema': os.getenv('SNOWFLAKE_SCHEMA'),
+}
 
 def get_col_map(sheet_name, df):
     # 先處理欄位名乾淨
@@ -39,6 +52,81 @@ def get_col_map(sheet_name, df):
     else:
         col_map = {'Module': 'Module', 'Description': 'Description', 'Price': 'Price'}
     return col_map
+
+
+def load_pricelist_file(file_path):
+    """Load excel pricelist and return combined DataFrame."""
+    sheets = pd.read_excel(file_path, sheet_name=None, header=2)
+    dfs = []
+    for sheet_name, df in sheets.items():
+        df = df.rename(columns=get_col_map(sheet_name, df))
+        if not all(col in df.columns for col in ['Module', 'Description', 'Price']):
+            continue
+        df = df[['Module', 'Description', 'Price']]
+        df['PRICE_LIST'] = sheet_name
+        dfs.append(df)
+    if dfs:
+        combined = pd.concat(dfs, ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=['Module', 'Description', 'Price', 'PRICE_LIST'])
+    return combined[['PRICE_LIST', 'Module', 'Description', 'Price']]
+
+
+def upload_pricelist_to_snowflake(file_path, conn_params=SNOWFLAKE_CONFIG, prefix='PRICELIST'):
+    """Upload pricelist to Snowflake and return table name."""
+    df = load_pricelist_file(file_path)
+    table_name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}"
+    conn = snowflake.connector.connect(**conn_params)
+    try:
+        write_pandas(conn, df, table_name.upper(), auto_create_table=True)
+    finally:
+        conn.close()
+    return table_name
+
+
+def fetch_pricelist_from_snowflake(table_name, conn_params=SNOWFLAKE_CONFIG):
+    conn = snowflake.connector.connect(**conn_params)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT PRICE_LIST, Module, Description, Price FROM {table_name}")
+        df = cur.fetch_pandas_all()
+    finally:
+        cur.close()
+        conn.close()
+    return df
+
+
+def download_pricelist_from_snowflake(table_name, output_file, conn_params=SNOWFLAKE_CONFIG):
+    df = fetch_pricelist_from_snowflake(table_name, conn_params)
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        for sheet, sdf in df.groupby('PRICE_LIST'):
+            sdf = sdf[['Module', 'Description', 'Price']]
+            sdf.to_excel(writer, index=False, sheet_name=sheet[:31])
+
+
+def list_uploaded_tables(conn_params=SNOWFLAKE_CONFIG, prefix='PRICELIST'):
+    conn = snowflake.connector.connect(**conn_params)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SHOW TABLES LIKE '{prefix.upper()}%'")
+        tables = [row[1] for row in cur.fetchall()]
+    finally:
+        cur.close()
+        conn.close()
+    return tables
+
+
+def compare_with_snowflake(table_name, new_file, output_file, log_func=print, conn_params=SNOWFLAKE_CONFIG):
+    df = fetch_pricelist_from_snowflake(table_name, conn_params)
+    with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
+        with pd.ExcelWriter(tmp.name, engine='openpyxl') as writer:
+            for sheet, sdf in df.groupby('PRICE_LIST'):
+                sdf[['Module', 'Description', 'Price']].to_excel(writer, index=False, sheet_name=sheet[:31])
+        temp_name = tmp.name
+    try:
+        run_compare(temp_name, new_file, output_file, log_func=log_func)
+    finally:
+        os.remove(temp_name)
 
 
 def run_compare(old_file, new_file, output_file, log_func=print):
@@ -299,8 +387,17 @@ class PriceDiffGUI:
         self.run_btn = tk.Button(master, text="Run Comparison", command=self.run_compare)
         self.run_btn.grid(row=3, column=1)
 
+        self.upload_btn = tk.Button(master, text="Upload to Snowflake", command=self.upload)
+        self.upload_btn.grid(row=3, column=2)
+
+        self.compare_sf_btn = tk.Button(master, text="Compare with Snowflake", command=self.compare_with_sf)
+        self.compare_sf_btn.grid(row=4, column=1)
+
+        self.download_btn = tk.Button(master, text="Download from Snowflake", command=self.download)
+        self.download_btn.grid(row=4, column=2)
+
         self.log_text = tk.Text(master, height=15, width=80)
-        self.log_text.grid(row=4, column=0, columnspan=3, padx=10, pady=10)
+        self.log_text.grid(row=5, column=0, columnspan=3, padx=10, pady=10)
 
     def log(self, msg):
         self.master.after(0, lambda: self._append_log(msg))
@@ -350,6 +447,62 @@ class PriceDiffGUI:
         except Exception as e:
             self.log(f"Error: {e}")
             messagebox.showerror("Error", f"執行失敗：\n{e}")
+
+    def upload(self):
+        new_file = self.new_entry.get()
+        if not new_file:
+            messagebox.showerror("Input Error", "請選擇新檔路徑")
+            return
+        try:
+            table = upload_pricelist_to_snowflake(new_file)
+            messagebox.showinfo("Done", f"已上傳至表格: {table}")
+        except Exception as e:
+            messagebox.showerror("Error", f"上傳失敗：\n{e}")
+
+    def compare_with_sf(self):
+        new_file = self.new_entry.get()
+        if not new_file:
+            messagebox.showerror("Input Error", "請選擇新檔路徑")
+            return
+        tables = list_uploaded_tables()
+        if not tables:
+            messagebox.showerror("Error", "Snowflake中沒有可用的表格")
+            return
+        table = simpledialog.askstring("Table", f"請輸入要比較的表格\n可選: {', '.join(tables)}")
+        if not table:
+            return
+        output_file = self.out_entry.get() or self.default_output
+        threading.Thread(
+            target=self._thread_compare_sf,
+            args=(table, new_file, output_file),
+            daemon=True
+        ).start()
+
+    def _thread_compare_sf(self, table, new_file, output_file):
+        try:
+            compare_with_snowflake(table, new_file, output_file, log_func=self.log)
+            self.log("Finished!")
+            messagebox.showinfo("Done", f"比對完成，結果儲存在：\n{output_file}")
+        except Exception as e:
+            self.log(f"Error: {e}")
+            messagebox.showerror("Error", f"執行失敗：\n{e}")
+
+    def download(self):
+        tables = list_uploaded_tables()
+        if not tables:
+            messagebox.showerror("Error", "Snowflake中沒有可用的表格")
+            return
+        table = simpledialog.askstring("Table", f"請輸入要下載的表格\n可選: {', '.join(tables)}")
+        if not table:
+            return
+        file = filedialog.asksaveasfilename(defaultextension='.xlsx', filetypes=[("Excel files", "*.xlsx;*.xls")])
+        if not file:
+            return
+        try:
+            download_pricelist_from_snowflake(table, file)
+            messagebox.showinfo("Done", f"已下載到：\n{file}")
+        except Exception as e:
+            messagebox.showerror("Error", f"下載失敗：\n{e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
