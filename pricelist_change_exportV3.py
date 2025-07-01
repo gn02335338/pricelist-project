@@ -54,27 +54,32 @@ def get_col_map(sheet_name, df):
     return col_map
 
 
-def load_pricelist_file(file_path):
+def load_pricelist_file(file_path, log_func=None):
     """Load excel pricelist and return combined DataFrame."""
     sheets = pd.read_excel(file_path, sheet_name=None, header=2)
     dfs = []
+    required = ['Module', 'Description', 'Price']
     for sheet_name, df in sheets.items():
         df = df.rename(columns=get_col_map(sheet_name, df))
-        if not all(col in df.columns for col in ['Module', 'Description', 'Price']):
+        if not all(col in df.columns for col in required):
+            if log_func:
+                log_func(f"Skip sheet {sheet_name}: missing columns")
             continue
-        df = df[['Module', 'Description', 'Price']]
+        df = df[required]
         df['PRICE_LIST'] = sheet_name
         dfs.append(df)
     if dfs:
         combined = pd.concat(dfs, ignore_index=True)
     else:
-        combined = pd.DataFrame(columns=['Module', 'Description', 'Price', 'PRICE_LIST'])
+        combined = pd.DataFrame(columns=['PRICE_LIST', 'Module', 'Description', 'Price'])
     return combined[['PRICE_LIST', 'Module', 'Description', 'Price']]
 
 
-def upload_pricelist_to_snowflake(file_path, conn_params=SNOWFLAKE_CONFIG, prefix='PRICELIST'):
+def upload_pricelist_to_snowflake(file_path, conn_params=SNOWFLAKE_CONFIG, prefix='PRICELIST', log_func=print):
     """Upload pricelist to Snowflake and return table name."""
-    df = load_pricelist_file(file_path)
+    df = load_pricelist_file(file_path, log_func=log_func)
+    if df.empty:
+        raise ValueError("No valid sheets to upload")
     table_name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}"
     conn = snowflake.connector.connect(**conn_params)
     try:
@@ -454,8 +459,10 @@ class PriceDiffGUI:
             messagebox.showerror("Input Error", "請選擇新檔路徑")
             return
         try:
-            table = upload_pricelist_to_snowflake(new_file)
+            table = upload_pricelist_to_snowflake(new_file, log_func=self.log)
             messagebox.showinfo("Done", f"已上傳至表格: {table}")
+        except ValueError as e:
+            messagebox.showwarning("Warning", str(e))
         except Exception as e:
             messagebox.showerror("Error", f"上傳失敗：\n{e}")
 
