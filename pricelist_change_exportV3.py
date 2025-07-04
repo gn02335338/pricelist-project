@@ -60,6 +60,34 @@ def run_compare(old_file, new_file, output_file, log_func=print):
     local_log(f"全部 sheet 一次性讀取完畢，花費 {time.time() - t0:.2f} 秒")
 
     result_rows = []
+    issues = []
+
+    def check_issues(df, sheet_name, which):
+        dup_rows = df[df['Module'].duplicated(keep=False)]
+        for _, r in dup_rows.iterrows():
+            issues.append({
+                'Sheet': sheet_name,
+                'Module': r['Module'],
+                'Description': r['Description'],
+                'Price': r['Price'],
+                'Issue': f'Duplicate Module ({which})'
+            })
+        df = df.drop_duplicates(subset=['Module'], keep='first')
+
+        mask_zero = (
+            df['Module'].notna() & (df['Module'] != '') &
+            df['Description'].notna() & (df['Description'] != '') &
+            (df['Price'].isna() | (df['Price'] == 0) | (df['Price'] == ''))
+        )
+        for _, r in df[mask_zero].iterrows():
+            issues.append({
+                'Sheet': sheet_name,
+                'Module': r['Module'],
+                'Description': r['Description'],
+                'Price': r['Price'],
+                'Issue': f'Price is zero ({which})'
+            })
+        return df
     old_sheet_set = set(sheets_old_all.keys())
     new_sheet_set = set(sheets_new_all.keys())
 
@@ -91,8 +119,11 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         df_old = df_old[['Module', 'Description', 'Price']]
         df_new = df_new[['Module', 'Description', 'Price']]
 
-        df_old.set_index(['Module', 'Description'], inplace=True)
-        df_new.set_index(['Module', 'Description'], inplace=True)
+        df_old = check_issues(df_old, sheet_name, 'Old')
+        df_new = check_issues(df_new, sheet_name, 'New')
+
+        df_old.set_index('Module', inplace=True)
+        df_new.set_index('Module', inplace=True)
         df_merge = pd.merge(
             df_old, df_new,
             how='outer',
@@ -159,14 +190,18 @@ def run_compare(old_file, new_file, output_file, log_func=print):
             else:
                 trend = ''
 
-            module = idx[0]
+            module = idx
             header1 = cost_lookup.get(module)
             region = cust_lookup.get(sheet_name)
+
+            desc_val = row.get('Description_new') if not pd.isna(row.get('Description_new')) else row.get('Description_old')
+            if sheet_name == 'Sales Team Pricelist':
+                desc_val = ''
 
             result_rows.append({
                 'PRICE_LIST': sheet_name,
                 'ITEM': module,
-                'DENSITY': idx[1] if sheet_name != 'Sales Team Pricelist' else '',
+                'DENSITY': desc_val,
                 'PRICE_NEW': new_val_f,
                 'PRICE_OLD': old_val_f,
                 'PERCENTAGE_CHANGE': f"{percentage_change:.2%}" if percentage_change is not None else '',
@@ -187,6 +222,7 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         if not all(col in df_new.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_new = df_new[['Module', 'Description', 'Price']]
+        df_new = check_issues(df_new, sheet_name, 'New')
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_new.iterrows():
@@ -220,10 +256,11 @@ def run_compare(old_file, new_file, output_file, log_func=print):
 
     for sheet_name in sheets_only_in_old:
         df_old = sheets_old_all[sheet_name]
-        df_old = df_new.rename(columns=get_col_map(sheet_name, df_old))
+        df_old = df_old.rename(columns=get_col_map(sheet_name, df_old))
         if not all(col in df_old.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_old = df_old[['Module', 'Description', 'Price']]
+        df_old = check_issues(df_old, sheet_name, 'Old')
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_old.iterrows():
@@ -265,6 +302,8 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         pd.DataFrame(result_rows).to_excel(writer, index=False, sheet_name="Compare")
         # log另存一個Log分頁
         pd.DataFrame({'Log': log_msgs}).to_excel(writer, index=False, sheet_name="Log")
+        if issues:
+            pd.DataFrame(issues).to_excel(writer, index=False, sheet_name="Issues")
 
     local_log(f'全部完成！報告存在 {output_file}')
 
