@@ -14,7 +14,9 @@ V3.1:
 1.增加處理欄位時先去掉換行符號(\n)的處理
 2.增加Sales Team Pricelist的處理, 這個sheet沒有Description欄位, 故先將Order值拉進來, 最後再清空
 3.修正Customer Support未正常輸出問題
-4.修正新增商品價格會錯誤的問題   
+4.修正新增商品價格會錯誤的問題
+V3.2:
+1.比對前清理Module與Description欄位中的換行與前後空白, 避免因隱藏空白造成重複更新
   
 '''
 
@@ -118,6 +120,11 @@ def run_compare(old_file, new_file, output_file, log_func=print):
             continue
         df_old = df_old[['Module', 'Description', 'Price']]
         df_new = df_new[['Module', 'Description', 'Price']]
+
+        # 去除Module與Description欄位中的換行與前後空白，避免因隱藏空白造成比對異常
+        for df in (df_old, df_new):
+            df['Module'] = df['Module'].astype(str).str.replace('\n', ' ').str.strip()
+            df['Description'] = df['Description'].astype(str).str.replace('\n', ' ').str.strip()
 
         df_old = check_issues(df_old, sheet_name, 'Old')
         df_new = check_issues(df_new, sheet_name, 'New')
