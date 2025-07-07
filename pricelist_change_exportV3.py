@@ -85,6 +85,12 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         df_old = df_old.rename(columns=get_col_map(sheet_name, df_old))
         df_new = df_new.rename(columns=get_col_map(sheet_name, df_new))
 
+        # Trim whitespace from key fields after renaming
+        df_old['Module'] = df_old['Module'].astype(str).str.strip()
+        df_old['Description'] = df_old['Description'].astype(str).str.strip()
+        df_new['Module'] = df_new['Module'].astype(str).str.strip()
+        df_new['Description'] = df_new['Description'].astype(str).str.strip()
+
         if not all(col in df_old.columns for col in ['Module', 'Description', 'Price']):
             local_log(f"  跳過 sheet {sheet_name}（缺欄位）")
             continue
@@ -187,6 +193,8 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         if not all(col in df_new.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_new = df_new[['Module', 'Description', 'Price']]
+        df_new['Module'] = df_new['Module'].astype(str).str.strip()
+        df_new['Description'] = df_new['Description'].astype(str).str.strip()
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_new.iterrows():
@@ -224,6 +232,8 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         if not all(col in df_old.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_old = df_old[['Module', 'Description', 'Price']]
+        df_old['Module'] = df_old['Module'].astype(str).str.strip()
+        df_old['Description'] = df_old['Description'].astype(str).str.strip()
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_old.iterrows():
