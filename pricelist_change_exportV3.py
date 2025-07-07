@@ -14,7 +14,11 @@ V3.1:
 1.增加處理欄位時先去掉換行符號(\n)的處理
 2.增加Sales Team Pricelist的處理, 這個sheet沒有Description欄位, 故先將Order值拉進來, 最後再清空
 3.修正Customer Support未正常輸出問題
-4.修正新增商品價格會錯誤的問題   
+4.修正新增商品價格會錯誤的問題
+V3.2:
+1.改為只比較Module的Price變動，不再比較Description的變動
+2.增加Issues分頁, 用來記錄重複的Module, 以及價格為0或nan的情況
+3.比對前清理Module與Description欄位中的換行與前後空白, 避免因隱藏空白造成重複更新
   
 '''
 
@@ -60,6 +64,56 @@ def run_compare(old_file, new_file, output_file, log_func=print):
     local_log(f"全部 sheet 一次性讀取完畢，花費 {time.time() - t0:.2f} 秒")
 
     result_rows = []
+    issues = []
+
+    def check_issues(df, sheet_name, which):
+        def log_issue(row, issue_type):
+            """將問題資料寫入全域 issues list（跳過 Module/Description 無效的 row）"""
+            if pd.isna(row['Module']) or pd.isna(row['Description']) or row['Description'] == 'nan': #這邊不確定為什麼還是會有nan出現，只好多寫這個條件
+                return
+            issues.append({
+                'Sheet': sheet_name,
+                'Module': row['Module'],
+                'Description': row['Description'],
+                'Price': row['Price'],
+                'Issue': f'{issue_type}'
+            })
+
+        # 🔹 確保 DataFrame 是獨立副本
+        df = df.copy()
+
+        # 🔹 處理空字串 → NaN
+        df.loc[:, 'Module'] = df['Module'].replace('', np.nan)
+        df.loc[:, 'Description'] = df['Description'].replace('', np.nan)
+
+        # 🔹 定義有效資料（Module 與 Description 都非空）
+        valid_mask = df['Module'].notna() & df['Description'].notna()
+
+        # 🔹 找出有效資料中的重複 Module
+        dup_mask = valid_mask & df['Module'].duplicated(keep=False)
+        if which == 'New':
+            for _, row in df[dup_mask].iterrows():
+                log_issue(row, 'Duplicate Module')
+
+        # 🔹 移除所有重複 Module 的 row
+        df = df[~dup_mask].copy()
+
+        # 🔹 轉換 Price 為數值，非法轉為 NaN
+        df.loc[:, 'Price'] = pd.to_numeric(df['Price'], errors='coerce')
+
+        # 🔹 再次定義有效資料（因為 df 已被過濾）
+        valid_mask = df['Module'].notna() & df['Description'].notna()
+
+        # 🔹 找出 Price 無效的 row（NaN 或 0）
+        price_invalid_mask = valid_mask & (df['Price'].isna() | (df['Price'] == 0))
+        if which == 'New':
+            for _, row in df[price_invalid_mask].iterrows():
+                log_issue(row, 'Price is zero')
+
+        return df
+
+
+
     old_sheet_set = set(sheets_old_all.keys())
     new_sheet_set = set(sheets_new_all.keys())
 
@@ -91,8 +145,16 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         df_old = df_old[['Module', 'Description', 'Price']]
         df_new = df_new[['Module', 'Description', 'Price']]
 
-        df_old.set_index(['Module', 'Description'], inplace=True)
-        df_new.set_index(['Module', 'Description'], inplace=True)
+        # 去除Module與Description欄位中的換行與前後空白，避免因隱藏空白造成比對異常
+        for df in (df_old, df_new):
+            df['Module'] = df['Module'].astype(str).str.replace('\n', ' ').str.strip()
+            df['Description'] = df['Description'].astype(str).str.replace('\n', ' ').str.strip()
+
+        df_old = check_issues(df_old, sheet_name, 'Old')
+        df_new = check_issues(df_new, sheet_name, 'New')
+
+        df_old.set_index('Module', inplace=True)
+        df_new.set_index('Module', inplace=True)
         df_merge = pd.merge(
             df_old, df_new,
             how='outer',
@@ -159,14 +221,18 @@ def run_compare(old_file, new_file, output_file, log_func=print):
             else:
                 trend = ''
 
-            module = idx[0]
+            module = idx
             header1 = cost_lookup.get(module)
             region = cust_lookup.get(sheet_name)
+
+            desc_val = row.get('Description_new') if not pd.isna(row.get('Description_new')) else row.get('Description_old')
+            if sheet_name == 'Sales Team Pricelist':
+                desc_val = ''
 
             result_rows.append({
                 'PRICE_LIST': sheet_name,
                 'ITEM': module,
-                'DENSITY': idx[1] if sheet_name != 'Sales Team Pricelist' else '',
+                'DENSITY': desc_val,
                 'PRICE_NEW': new_val_f,
                 'PRICE_OLD': old_val_f,
                 'PERCENTAGE_CHANGE': f"{percentage_change:.2%}" if percentage_change is not None else '',
@@ -187,6 +253,7 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         if not all(col in df_new.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_new = df_new[['Module', 'Description', 'Price']]
+        df_new = check_issues(df_new, sheet_name, 'New')
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_new.iterrows():
@@ -220,10 +287,11 @@ def run_compare(old_file, new_file, output_file, log_func=print):
 
     for sheet_name in sheets_only_in_old:
         df_old = sheets_old_all[sheet_name]
-        df_old = df_new.rename(columns=get_col_map(sheet_name, df_old))
+        df_old = df_old.rename(columns=get_col_map(sheet_name, df_old))
         if not all(col in df_old.columns for col in ['Module', 'Description', 'Price']):
             continue
         df_old = df_old[['Module', 'Description', 'Price']]
+        df_old = check_issues(df_old, sheet_name, 'Old')
         region = cust_lookup.get(sheet_name, '')
         has_row = False
         for _, row in df_old.iterrows():
@@ -265,6 +333,8 @@ def run_compare(old_file, new_file, output_file, log_func=print):
         pd.DataFrame(result_rows).to_excel(writer, index=False, sheet_name="Compare")
         # log另存一個Log分頁
         pd.DataFrame({'Log': log_msgs}).to_excel(writer, index=False, sheet_name="Log")
+        if issues:
+            pd.DataFrame(issues).to_excel(writer, index=False, sheet_name="Issues")
 
     local_log(f'全部完成！報告存在 {output_file}')
 
